@@ -20,58 +20,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Decode cookies from Base64 env var on startup ─────────────────────────────
-COOKIES_PATH: Path | None = None
-
-
-def _init_cookies() -> None:
-    global COOKIES_PATH
-
-    file_path = os.getenv("COOKIES_FILE", "").strip()
-    if file_path and Path(file_path).exists():
-        COOKIES_PATH = Path(file_path)
-        logger.info("Cookies loaded from file: %s", COOKIES_PATH)
-        return
-
-    b64 = os.getenv("COOKIES_B64", "").strip()
+# ── Cookies ───────────────────────────────────────────────────────────────────
+def _decode_cookies(env_var: str, filename: str) -> Path | None:
+    b64 = os.getenv(env_var, "").strip()
     if not b64:
-        logger.info("No cookies configured")
-        return
+        return None
     try:
         data = base64.b64decode(b64)
-        p = Path(tempfile.gettempdir()) / "yt_cookies.txt"
+        p = Path(tempfile.gettempdir()) / filename
         p.write_bytes(data)
-        COOKIES_PATH = p
-        logger.info("Cookies decoded from COOKIES_B64 → %s (%d bytes)", p, len(data))
+        logger.info("%s decoded → %s (%d bytes)", env_var, p, len(data))
+        return p
     except Exception as e:
-        logger.error("Failed to decode COOKIES_B64: %s", e)
+        logger.error("Failed to decode %s: %s", env_var, e)
+        return None
 
-
-_init_cookies()
+COOKIES_INSTAGRAM: Path | None = _decode_cookies("COOKIES_INSTAGRAM", "cookies_instagram.txt")
+COOKIES_X:         Path | None = _decode_cookies("COOKIES_X",         "cookies_x.txt")
 
 # ── URL detection ─────────────────────────────────────────────────────────────
 URL_PATTERN = re.compile(r"https?://[^\s]+")
 
 SUPPORTED_DOMAINS = (
-    "youtu.be",
-    "youtube.com",
-    "music.youtube.com",
+    "youtu.be", "youtube.com", "music.youtube.com",
     "instagram.com",
-    "tiktok.com",
-    "vt.tiktok.com",
-    "vm.tiktok.com",
-    "twitter.com",
-    "x.com",
-)
-
-# These platforms work fine without cookies
-NO_COOKIES_DOMAINS = (
-    "tiktok.com",
-    "vt.tiktok.com",
-    "vm.tiktok.com",
-    "youtu.be",
-    "youtube.com",
-    "music.youtube.com",
+    "tiktok.com", "vt.tiktok.com", "vm.tiktok.com",
+    "twitter.com", "x.com",
 )
 
 MAX_BYTES = 50 * 1024 * 1024
@@ -83,6 +57,27 @@ _YT_EXTRACTOR_ARGS = {
     }
 }
 
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Fetch-Mode": "navigate",
+}
+
+_X_HEADERS = {
+    **_BROWSER_HEADERS,
+    "Referer": "https://x.com/",
+    "Origin": "https://x.com",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+}
+
 
 def extract_url(text: str) -> str | None:
     for m in URL_PATTERN.finditer(text or ""):
@@ -92,15 +87,19 @@ def extract_url(text: str) -> str | None:
     return None
 
 
-def needs_cookies(url: str) -> bool:
-    return not any(d in url for d in NO_COOKIES_DOMAINS)
-
-
 def is_youtube(url: str) -> bool:
     return "youtu" in url
 
+def is_instagram(url: str) -> bool:
+    return "instagram.com" in url
+
+def is_twitter(url: str) -> bool:
+    return "x.com" in url or "twitter.com" in url
+
 
 def ydl_opts(out_path: str, url: str = "") -> dict:
+    headers = _X_HEADERS if is_twitter(url) else _BROWSER_HEADERS
+
     opts = {
         "format": (
             "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
@@ -114,20 +113,16 @@ def ydl_opts(out_path: str, url: str = "") -> dict:
         "no_warnings": True,
         "socket_timeout": 30,
         "noplaylist": True,
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
-        },
+        "http_headers": headers,
     }
 
-    # Only attach cookies for platforms that need them (Instagram, X)
-    if COOKIES_PATH and needs_cookies(url):
-        opts["cookiefile"] = str(COOKIES_PATH)
-        logger.info("Using cookies for: %s", url)
+    # Attach platform-specific cookies
+    if is_instagram(url) and COOKIES_INSTAGRAM:
+        opts["cookiefile"] = str(COOKIES_INSTAGRAM)
+    elif is_twitter(url) and COOKIES_X:
+        opts["cookiefile"] = str(COOKIES_X)
 
+    # YouTube player client fallbacks
     if is_youtube(url):
         opts["extractor_args"] = _YT_EXTRACTOR_ARGS
         opts["format"] = (
@@ -228,7 +223,11 @@ def main():
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
-    logger.info("Bot started — cookies: %s", COOKIES_PATH or "none")
+    logger.info(
+        "Bot started — Instagram cookies: %s | X cookies: %s",
+        "✓" if COOKIES_INSTAGRAM else "✗",
+        "✓" if COOKIES_X else "✗",
+    )
     app.run_polling(drop_pending_updates=True)
 
 
