@@ -1,7 +1,5 @@
 python-telegram-bot==21.5
 yt-dlp
-yt-dlp-get-pot>=0.3.0
-bgutil-ytdlp-pot-provider
 instagrapi==2.1.2
 httpx==0.27.2
 Pillow==10.4.0
