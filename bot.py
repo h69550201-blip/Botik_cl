@@ -90,12 +90,11 @@ def instagram_opts(outdir: str) -> dict:
 def youtube_opts(outdir: str) -> dict:
     opts = base_ydl_opts(outdir)
     opts.update({
-        "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best",
-        # Use the iOS client — not affected by po_token requirement
+        # iOS client bypasses bot detection; broad format fallback chain
+        "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
         "extractor_args": {
             "youtube": {
-                "player_client": ["ios", "web"],
-                "player_skip": ["webpage", "configs"],
+                "player_client": ["ios"],
             }
         },
     })
