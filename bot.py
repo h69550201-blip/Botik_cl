@@ -54,19 +54,18 @@ def base_ydl_opts(outdir: str) -> dict:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        # Best video+audio up to 1080p, merged to mp4
         "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
         "merge_output_format": "mp4",
-        # Bypass common bot-detection
         "http_headers": {
             "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
+                "com.google.ios.youtube/19.29.1 CFNetwork/1474 Darwin/23.0.0"
             ),
         },
+        # Retry & sleep to avoid rate limiting
+        "retries": 5,
+        "fragment_retries": 5,
+        "sleep_interval_requests": 1,
         "extractor_args": {
-            # TikTok: use the mobile API endpoint
             "tiktok": {"api_hostname": ["api22-normal-c-alisg.tiktokv.com"]},
         },
         "cookiefile": "cookies.txt" if Path("cookies.txt").exists() else None,
@@ -91,8 +90,14 @@ def instagram_opts(outdir: str) -> dict:
 def youtube_opts(outdir: str) -> dict:
     opts = base_ydl_opts(outdir)
     opts.update({
-        # Shorts work the same way as regular videos in yt-dlp
         "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best",
+        # Use the iOS client — not affected by po_token requirement
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios", "web"],
+                "player_skip": ["webpage", "configs"],
+            }
+        },
     })
     return opts
 
