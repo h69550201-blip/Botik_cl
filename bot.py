@@ -25,8 +25,9 @@ URL_PATTERN = re.compile(
     r"(?:www\.)?"
     r"(?:"
     r"youtu(?:be\.com/(?:watch\?v=|shorts/)|\.be/)"
-    r"|instagram\.com/(?:p|reel|tv)/"
-    r"|tiktok\.com/@[\w.]+/video/"
+    r"|instagram\.com/(?:p|reel|tv|stories)/"
+    r"|tiktok\.com/(?:@[\w.]+/video/|t/)"
+    r"|vm\.tiktok\.com/"
     r"|(?:twitter|x)\.com/\w+/status/"
     r")"
     r"[\w\-?=&%./]+"
@@ -35,6 +36,14 @@ URL_PATTERN = re.compile(
 # Max file size Telegram allows for bots (50 MB)
 MAX_BYTES = 50 * 1024 * 1024
 
+# YouTube extractor args — bypass bot-detection without cookies
+_YT_EXTRACTOR_ARGS = {
+    "youtube": {
+        "player_client": ["web_creator", "android", "web"],
+        "player_skip": ["webpage"],
+    }
+}
+
 
 def extract_url(text: str) -> str | None:
     """Return the first supported video URL found in text, or None."""
@@ -42,20 +51,23 @@ def extract_url(text: str) -> str | None:
     return m.group(0) if m else None
 
 
-def ydl_opts(out_path: str) -> dict:
-    return {
+def is_youtube(url: str) -> bool:
+    return "youtu" in url
+
+
+def ydl_opts(out_path: str, url: str = "") -> dict:
+    opts = {
         "format": (
-            "bestvideo[ext=mp4][filesize<45M]+bestaudio[ext=m4a]"
-            "/bestvideo[filesize<45M]+bestaudio"
-            "/best[filesize<45M]"
+            "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
+            "/bestvideo[height<=720]+bestaudio"
+            "/best[height<=720]"
             "/best"
         ),
         "outtmpl": out_path,
         "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
-        "cookiefile": os.getenv("COOKIES_FILE"),   # optional – set in Railway
-        # Instagram / TikTok sometimes need a browser UA
+        "socket_timeout": 30,
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -63,9 +75,31 @@ def ydl_opts(out_path: str) -> dict:
                 "Chrome/124.0.0.0 Safari/537.36"
             )
         },
-        # Limit download speed so Railway free tier doesn't stall
-        "ratelimit": 5_000_000,   # 5 MB/s
     }
+
+    # YouTube-specific: use multiple player clients to avoid bot-detection
+    if is_youtube(url):
+        opts["extractor_args"] = _YT_EXTRACTOR_ARGS
+        # Use android client as primary — doesn't require PO token
+        opts["format"] = (
+            "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
+            "/bestvideo[height<=720]+bestaudio"
+            "/best[height<=720][ext=mp4]"
+            "/best[height<=720]"
+            "/best"
+        )
+
+    # Optional cookies file (set COOKIES_FILE env var in Railway)
+    cookies_file = os.getenv("COOKIES_FILE")
+    if cookies_file and Path(cookies_file).exists():
+        opts["cookiefile"] = cookies_file
+
+    # Optional cookies from browser (set COOKIES_FROM_BROWSER=chrome/firefox)
+    cookies_browser = os.getenv("COOKIES_FROM_BROWSER")
+    if cookies_browser:
+        opts["cookiesfrombrowser"] = (cookies_browser,)
+
+    return opts
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -82,16 +116,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     with tempfile.TemporaryDirectory() as tmp:
         out_path = str(Path(tmp) / "video.%(ext)s")
-        opts = ydl_opts(out_path)
+
+        # For YouTube, try up to 3 different client strategies
+        strategies = [ydl_opts(out_path, url)]
+        if is_youtube(url):
+            # Fallback 1: android_vr client (no PO token needed)
+            fb1 = ydl_opts(out_path, url)
+            fb1["extractor_args"] = {"youtube": {"player_client": ["android_vr"]}}
+            # Fallback 2: tv_embedded client
+            fb2 = ydl_opts(out_path, url)
+            fb2["extractor_args"] = {"youtube": {"player_client": ["tv_embedded"]}}
+            strategies += [fb1, fb2]
+
+        info = None
+        last_error = None
+
+        for i, opts in enumerate(strategies):
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                last_error = None
+                break  # success
+            except yt_dlp.utils.DownloadError as e:
+                last_error = e
+                logger.warning("Strategy %d failed: %s", i + 1, e)
+                # Clean up partial files before retry
+                for f in Path(tmp).glob("*"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
 
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                # find the actual downloaded file
-                files = list(Path(tmp).glob("*"))
-                if not files:
-                    raise FileNotFoundError("Файл не знайдено після завантаження")
-                video_file = max(files, key=lambda f: f.stat().st_size)
+            if last_error:
+                raise last_error
+
+            files = list(Path(tmp).glob("*"))
+            if not files:
+                raise FileNotFoundError("Файл не знайдено після завантаження")
+            video_file = max(files, key=lambda f: f.stat().st_size)
 
             file_size = video_file.stat().st_size
             if file_size > MAX_BYTES:
